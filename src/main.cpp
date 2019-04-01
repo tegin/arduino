@@ -1,37 +1,24 @@
 #include <Arduino.h>
-/*
-    This sketch establishes a TCP connection to a "quote of the day" service.
-    It sends a "hello" message, and then prints received data.
-*/
-
+#include <FS.h> // Manage the nodeMCU filesystem
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
-
-#include <LiquidCrystal.h>
 #include <MFRC522.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
-#ifndef STASSID
-  #define STASSID "YOUR WIFI NET"
-  #define STAPSK  "YOUR PASSWORD"
-#endif
-#ifndef SERVICENAME
-  #define SERVICENAME "RAS01"
-  #define PASSPHRASE  "ras_01"
-#endif
+#include <WiFiManager.h>
+WiFiManager wifiManager;
+ESP8266WebServer *server;
 
-const char* ssid     = STASSID;
-const char* password = STAPSK;
-const String host = "http://192.168.1.67:8069";
-const uint16_t port = 8069;
-String service_name = SERVICENAME;
-String passphrase = PASSPHRASE;
+String ssid     = "TEST_RAS";
+String password = "test_ras";
+String host;
+String service_name;
+String passphrase;
 WiFiClient c;
+bool configured = false;
 #define SS_PIN 4  //D2
 #define RST_PIN 5 //D1
-#define LCD_PIN 2
 MFRC522 mfrc522(SS_PIN, RST_PIN);
-LiquidCrystal lcd(LCD_PIN);
 String printArray(byte *buffer, byte bufferSize) {
   String s = "";
   for (byte i = 0; i < bufferSize; i++) {
@@ -40,17 +27,103 @@ String printArray(byte *buffer, byte bufferSize) {
   return s;
 }
 
+void submit() {
+  Serial.println(server->arg("ssid"));
+
+    Serial.println(server->arg("password"));
+    Serial.println(server->arg("odoo_link"));
+}
+void handleRoot() {
+  Serial.println("Handle Root");
+  String temp = "<html>\
+  <head>\
+    <meta http-equiv='refresh' content='5'/>\
+    <title>RAS Attendance System configuration Demo</title>\
+    <style>\
+      body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
+    </style>\
+  </head>\
+  <body>\
+    <h1>Hello to RAS Attendance System</h1>\
+    <p>Fille the following form</p>\
+    <form action='/submit' method='post'>\
+      Wifi SSID:<br/>\
+      <input type='text' name='ssid'/><br/>\
+      Password:<br/>\
+      <input type='text' name='password'/><br/>\
+      Odoo link<br/>\
+      <input type='text' name='odoo_link'/><br/>\
+      <input type='submit' value='Submit'>\
+    </form>\
+  </body>\
+</html>";
+  server->send(200, "text/html", temp);
+}
+
+void handleNotFound() {
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += server->uri();
+  message += "\nMethod: ";
+  message += (server->method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server->args();
+  message += "\n";
+
+  for (uint8_t i = 0; i < server->args(); i++) {
+    message += " " + server->argName(i) + ": " + server->arg(i) + "\n";
+  }
+  server->send(404, "text/plain", message);
+}
+
 void setup() {
   Serial.begin(115200);
-   while (! Serial){
-     delay(1);
-   }
   // We start by connecting to a WiFi network
   SPI.begin();      //Función que inicializa SPI
+  Serial.println("mounting FS...");
 
-  lcd.begin(16, 2);
-    // Print a message to the LCD.
-    lcd.print("hello, world!");
+  if (SPIFFS.begin()) {
+    Serial.println("mounted file system");
+    if (SPIFFS.exists("/config.json")) {
+      //file exists, reading and loading
+      Serial.println("reading config file");
+      if (SPIFFS.begin()) {
+        Serial.println("mounted file system");
+        if (SPIFFS.exists("/config.json")) {
+          //file exists, reading and loading
+          Serial.println("reading config file");
+          File configFile = SPIFFS.open("/config.json", "r");
+          if (configFile) {
+            Serial.println("opened config file");
+            size_t size = configFile.size();
+            // Allocate a buffer to store contents of the file.
+            std::unique_ptr<char[]> buf(new char[size]);
+
+            configFile.readBytes(buf.get(), size);
+            DynamicJsonDocument doc(1000);
+            auto error = deserializeJson(doc, buf.get());
+            if (error) {
+                Serial.print(F("deserializeJson() failed with code "));
+                Serial.println(error.c_str());
+            }
+            else {
+              JsonObject json = doc.as<JsonObject>();
+              Serial.println("\nparsed json");
+              host = json["host"].as<String>();
+              ssid = json["ssid"].as<String>();
+              password = json["password"].as<String>();
+              service_name = json["service_name"].as<String>();
+              passphrase = json["passphrase"].as<String>();
+              configured = true;
+            }
+          }
+        }
+      } else {
+        Serial.println("failed to mount FS");
+    }
+  }
+}
+if (configured){
   Serial.println();
   Serial.println();
   Serial.print("Connecting to ");
@@ -74,9 +147,24 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 }
+else {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid);
+  server = new ESP8266WebServer(80);
+  server->on("/", handleRoot);
+  server->on("/submit", submit);
+  server->on("/inline", []() {
+    server->send(200, "text/plain", "this works as well");
+  });
+   server->begin();
+}
+}
 
 void loop() {
-
+  if (! configured){
+    server->handleClient();
+    return;
+  }
   if ( ! mfrc522.PICC_IsNewCardPresent())
   {
     return;
@@ -94,12 +182,16 @@ void loop() {
     HTTPClient http;
 
     Serial.print("[HTTP] begin...\n");
-    if (http.begin(client, host + "/iot/"+service_name+"/action")) {  // HTTP
+    String url = "";
+    url = url + host;
+    url = url + "/iot/"+service_name+"/action";
+    if (http.begin(client, url)) {  // HTTP
       Serial.print("connecting to ");
       Serial.print(host);
-      Serial.print(':');
-      Serial.println(port);
-      String data = "passphrase=" + passphrase +"&value=" + card;
+      String data = "passphrase=";
+      data = data + passphrase;
+      data = data + "&value=";
+      data = data + card;
       http.addHeader("Content-Type", "application/x-www-form-urlencoded");
       int httpCode = http.POST(data);
       if (httpCode <= 0) {
