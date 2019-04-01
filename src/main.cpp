@@ -6,6 +6,8 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <WiFiManager.h>
+#include "SSD1306.h" // alias for `#include "SSD1306Wire.h"`
+SSD1306  display(0x3c, 0, 2);
 WiFiManager wifiManager;
 ESP8266WebServer *server;
 
@@ -26,12 +28,78 @@ String printArray(byte *buffer, byte bufferSize) {
   }
   return s;
 }
-
+void sleep(){
+  ESP.deepSleep(1e6);
+}
+void drawInitializing()
+{
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(ArialMT_Plain_24);
+    display.drawString(10, 0, "Initializing...");
+}
+void drawSoftAP(){
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(0, 10, "Connect to " + ssid);
+    String  MyIp;
+    MyIp =  String(WiFi.softAPIP()[0]) + "." + String(WiFi.softAPIP()[1]) + "." + String(WiFi.softAPIP()[2]) + "." + String(WiFi.softAPIP()[3]);
+    display.drawString(0, 30, "Access " + MyIp);
+}
 void submit() {
-  Serial.println(server->arg("ssid"));
+  ssid = server->arg("ssid");
+  password = server->arg("password");
+  String url = server->arg("odoo_link");
+  server->send(200, "text/html", "<html><body><<h1>Configuring</h1></body></html>");
+  WiFi.softAPdisconnect();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  int i = 1;
+  Serial.println(ssid);
+  Serial.println(password);
+  while (i<20 && WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    i += 1;
+    Serial.print(".");
+  }
+  if (i>= 20){
+    Serial.println("Configuration failed");
+    sleep();
+  }
+  WiFiClient client;
+  HTTPClient http;
+  if (http.begin(client, url)) {  // HTTP
+    Serial.print("connecting to ");
+    Serial.println(url);
+    String data = "template=";
+    data += "eficent.ras";
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    int httpCode = http.POST(data);
+    if (httpCode <= 0) {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    else if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(1000);
+      Serial.println(payload);
+      auto error = deserializeJson(doc, payload);
+      if (error) {
+          Serial.print(F("deserializeJson() failed with code "));
+          Serial.println(error.c_str());
+      }
+      else {
+        JsonObject object = doc.as<JsonObject>();
+        String action = object["action"].as<String>();
+        Serial.println(action);
+      }
+    }
+    http.end();
+    // Close the connection
+    Serial.println();
+    Serial.println("closing connection");
+    client.stop();
 
-    Serial.println(server->arg("password"));
-    Serial.println(server->arg("odoo_link"));
+  }
+  sleep();
 }
 void handleRoot() {
   Serial.println("Handle Root");
@@ -77,11 +145,16 @@ void handleNotFound() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   // We start by connecting to a WiFi network
   SPI.begin();      //Función que inicializa SPI
   Serial.println("mounting FS...");
+  display.init(); // Initialising the UI will init the display too.
+  display.flipScreenVertically();
 
+  display.clear();
+  drawInitializing();
+  display.display();
   if (SPIFFS.begin()) {
     Serial.println("mounted file system");
     if (SPIFFS.exists("/config.json")) {
@@ -157,6 +230,9 @@ else {
     server->send(200, "text/plain", "this works as well");
   });
    server->begin();
+   display.clear();
+   drawSoftAP();
+   display.display();
 }
 }
 
@@ -174,50 +250,47 @@ void loop() {
     return;
   }
   String card =  printArray(mfrc522.uid.uidByte, mfrc522.uid.size);
-
   mfrc522.PICC_HaltA();
   Serial.println(card);
-    WiFiClient client;
-
-    HTTPClient http;
-
-    Serial.print("[HTTP] begin...\n");
-    String url = "";
-    url = url + host;
-    url = url + "/iot/"+service_name+"/action";
-    if (http.begin(client, url)) {  // HTTP
-      Serial.print("connecting to ");
-      Serial.print(host);
-      String data = "passphrase=";
-      data = data + passphrase;
-      data = data + "&value=";
-      data = data + card;
-      http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-      int httpCode = http.POST(data);
-      if (httpCode <= 0) {
-        Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
-      }
-      else if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-        String payload = http.getString();
-        DynamicJsonDocument doc(1000);
-        Serial.println(payload);
-        auto error = deserializeJson(doc, payload);
-        if (error) {
-            Serial.print(F("deserializeJson() failed with code "));
-            Serial.println(error.c_str());
-        }
-        else {
-          JsonObject object = doc.as<JsonObject>();
-          String action = object["action"].as<String>();
-          Serial.println(action);
-        }
-      }
-      http.end();
-      // Close the connection
-      Serial.println();
-      Serial.println("closing connection");
-      client.stop();
+  WiFiClient client;
+  HTTPClient http;
+  Serial.print("[HTTP] begin...\n");
+  String url = "";
+  url = url + host;
+  url = url + "/iot/"+service_name+"/action";
+  if (http.begin(client, url)) {  // HTTP
+    Serial.print("connecting to ");
+    Serial.print(host);
+    String data = "passphrase=";
+    data = data + passphrase;
+    data = data + "&value=";
+    data = data + card;
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    int httpCode = http.POST(data);
+    if (httpCode <= 0) {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
     }
+    else if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(1000);
+      Serial.println(payload);
+      auto error = deserializeJson(doc, payload);
+      if (error) {
+          Serial.print(F("deserializeJson() failed with code "));
+          Serial.println(error.c_str());
+      }
+      else {
+        JsonObject object = doc.as<JsonObject>();
+        String action = object["action"].as<String>();
+        Serial.println(action);
+      }
+    }
+    http.end();
+    // Close the connection
+    Serial.println();
+    Serial.println("closing connection");
+    client.stop();
+  }
 
   delay(1000); // execute once every 5 minutes, don't flood remote service
 }
