@@ -45,6 +45,23 @@ void drawSoftAP(){
     MyIp =  String(WiFi.softAPIP()[0]) + "." + String(WiFi.softAPIP()[1]) + "." + String(WiFi.softAPIP()[2]) + "." + String(WiFi.softAPIP()[3]);
     display.drawString(0, 30, "Access " + MyIp);
 }
+
+void storeValues(){
+  File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile) {
+      Serial.println("failed to open config file for writing");
+  }Serial.println("saving config");
+
+  DynamicJsonDocument doc(1000);
+    doc["service_name"] = service_name;
+    doc["passphrase"] = passphrase;
+    doc["host"] = host;
+    doc["ssid"] = ssid;
+    doc["password"] = password;
+    serializeJson(doc, Serial);
+    serializeJson(doc, configFile);
+    configFile.close();
+}
 void submit() {
   ssid = server->arg("ssid");
   password = server->arg("password");
@@ -61,17 +78,19 @@ void submit() {
     i += 1;
     Serial.print(".");
   }
-  if (i>= 20){
+  if (i>= 40){
     Serial.println("Configuration failed");
     sleep();
   }
+  delay(10000);
+  Serial.println(WiFi.localIP());
   WiFiClient client;
   HTTPClient http;
   if (http.begin(client, url)) {  // HTTP
     Serial.print("connecting to ");
     Serial.println(url);
     String data = "template=";
-    data += "eficent.ras";
+    data = data + "eficent.ras";
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
     int httpCode = http.POST(data);
     if (httpCode <= 0) {
@@ -88,8 +107,12 @@ void submit() {
       }
       else {
         JsonObject object = doc.as<JsonObject>();
-        String action = object["action"].as<String>();
-        Serial.println(action);
+        JsonObject action = object["inputs"].as<JsonObject>()["rfid_read"].as<JsonObject>();
+        host = object["host"].as<String>();
+        service_name = action["serial"].as<String>();
+        passphrase = action["passphrase"].as<String>();
+        storeValues();
+        serializeJson(action, Serial);
       }
     }
     http.end();
@@ -155,42 +178,37 @@ void setup() {
   display.clear();
   drawInitializing();
   display.display();
-  if (SPIFFS.begin()) {
-    Serial.println("mounted file system");
-    if (SPIFFS.exists("/config.json")) {
-      //file exists, reading and loading
       Serial.println("reading config file");
       if (SPIFFS.begin()) {
         Serial.println("mounted file system");
         if (SPIFFS.exists("/config.json")) {
-          //file exists, reading and loading
-          Serial.println("reading config file");
-          File configFile = SPIFFS.open("/config.json", "r");
-          if (configFile) {
-            Serial.println("opened config file");
-            size_t size = configFile.size();
-            // Allocate a buffer to store contents of the file.
-            std::unique_ptr<char[]> buf(new char[size]);
+        //file exists, reading and loading
+        Serial.println("reading config file");
+        File configFile = SPIFFS.open("/config.json", "r");
+        if (configFile) {
+          Serial.println("opened config file");
+          size_t size = configFile.size();
+          // Allocate a buffer to store contents of the file.
+          std::unique_ptr<char[]> buf(new char[size]);
 
-            configFile.readBytes(buf.get(), size);
-            DynamicJsonDocument doc(1000);
-            auto error = deserializeJson(doc, buf.get());
-            if (error) {
-                Serial.print(F("deserializeJson() failed with code "));
-                Serial.println(error.c_str());
-            }
-            else {
-              JsonObject json = doc.as<JsonObject>();
-              Serial.println("\nparsed json");
-              host = json["host"].as<String>();
-              ssid = json["ssid"].as<String>();
-              password = json["password"].as<String>();
-              service_name = json["service_name"].as<String>();
-              passphrase = json["passphrase"].as<String>();
-              configured = true;
-            }
+          configFile.readBytes(buf.get(), size);
+          DynamicJsonDocument doc(1000);
+          auto error = deserializeJson(doc, buf.get());
+          if (error) {
+              Serial.print(F("deserializeJson() failed with code "));
+              Serial.println(error.c_str());
           }
-        }
+          else {
+            serializeJson(doc, Serial);
+            JsonObject json = doc.as<JsonObject>();
+            Serial.println("\nparsed json");
+            host = json["host"].as<String>();
+            ssid = json["ssid"].as<String>();
+            password = json["password"].as<String>();
+            service_name = json["service_name"].as<String>();
+            passphrase = json["passphrase"].as<String>();
+            configured = true;
+          }
       } else {
         Serial.println("failed to mount FS");
     }
@@ -258,6 +276,7 @@ void loop() {
   String url = "";
   url = url + host;
   url = url + "/iot/"+service_name+"/action";
+  Serial.println(url);
   if (http.begin(client, url)) {  // HTTP
     Serial.print("connecting to ");
     Serial.print(host);
